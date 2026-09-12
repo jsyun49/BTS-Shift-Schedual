@@ -283,6 +283,17 @@ export default function UsersPanel() {
     }
   }
 
+  async function deleteWorker(u: AdminUserView) {
+    if (!window.confirm(`${u.name} 계정과 등록된 모든 근무 기록을 영구 삭제합니다. 계속할까요?`)) return;
+    try {
+      await api.delete(`/users/${u.id}`);
+      showToast(`${u.name} 계정을 삭제했습니다.`);
+      load();
+    } catch (err) {
+      showToast(getApiErrorMessage(err), 'error');
+    }
+  }
+
   const workers = users.filter((u) => u.role === 'worker');
 
   return (
@@ -323,9 +334,14 @@ export default function UsersPanel() {
                   </span>
                 </td>
                 <td className="px-3 py-2.5">
-                  <button onClick={() => toggleActive(u)} className="text-xs text-gray-600 hover:underline">
-                    {u.isActive ? '비활성화' : '재활성화'}
-                  </button>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button onClick={() => toggleActive(u)} className="text-xs text-gray-600 hover:underline">
+                      {u.isActive ? '비활성화' : '재활성화'}
+                    </button>
+                    <button onClick={() => deleteWorker(u)} className="text-xs text-red-600 hover:underline">
+                      삭제
+                    </button>
+                  </div>
                 </td>
               </tr>
             ))}

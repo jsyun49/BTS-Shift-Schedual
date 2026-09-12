@@ -150,4 +150,35 @@ router.patch('/:id', requireRole('admin'), (req, res) => {
   res.json({ ok: true });
 });
 
+// Admin: permanently delete a worker account and everything tied to it. Deletes in dependency
+// order so foreign-key checks (foreign_keys=ON) don't reject the user delete — schedules and
+// notifications cascade on their own, but swap_requests and change_logs don't.
+router.delete('/:id', requireRole('admin'), (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id)) return res.status(400).json({ error: '잘못된 사용자 ID입니다.' });
+
+  const target = db.prepare('SELECT * FROM users WHERE id = ?').get(id) as UserRow | undefined;
+  if (!target) return res.status(404).json({ error: '사용자를 찾을 수 없습니다.' });
+  if (target.role === 'admin') {
+    return res.status(400).json({ error: '관리자 계정은 삭제할 수 없습니다.' });
+  }
+
+  db.exec('BEGIN');
+  try {
+    db.prepare(
+      `DELETE FROM swap_requests WHERE requester_id = ? OR target_id = ?
+         OR schedule_id IN (SELECT id FROM schedules WHERE user_id = ?)
+         OR target_schedule_id IN (SELECT id FROM schedules WHERE user_id = ?)`
+    ).run(id, id, id, id);
+    db.prepare('DELETE FROM change_logs WHERE user_id = ?').run(id);
+    db.prepare('DELETE FROM users WHERE id = ?').run(id);
+    db.exec('COMMIT');
+  } catch (err) {
+    db.exec('ROLLBACK');
+    throw err;
+  }
+
+  res.json({ ok: true });
+});
+
 export default router;
