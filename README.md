@@ -65,7 +65,7 @@ npm run dev                 # http://localhost:4000
 
 **초기 관리자 계정**
 - 아이디: `admin`
-- 비밀번호: `admin1234`
+- 비밀번호: `admin`
 
 로그인 후 반드시 비밀번호를 변경하세요.
 
