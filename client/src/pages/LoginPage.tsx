@@ -5,7 +5,6 @@ import { useAuth } from '../context/AuthContext';
 export default function LoginPage() {
   const { user, login } = useAuth();
   const [username, setUsername] = useState('');
-  const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
@@ -16,7 +15,7 @@ export default function LoginPage() {
     setError(null);
     setSubmitting(true);
     try {
-      await login(username, password);
+      await login(username);
     } catch (err) {
       setError(err instanceof Error ? err.message : '로그인에 실패했습니다.');
     } finally {
@@ -34,7 +33,7 @@ export default function LoginPage() {
 
       <div className="relative w-full max-w-sm rounded-2xl border border-white/20 bg-white/95 p-8 text-center shadow-2xl backdrop-blur-sm">
         <h1 className="mb-1 text-xl font-bold text-gray-900">BTS Shift Schedule</h1>
-        <p className="mb-6 text-sm text-gray-500">발급받은 아이디와 비밀번호로 로그인하세요.</p>
+        <p className="mb-6 text-sm text-gray-500">발급받은 아이디로 로그인하세요.</p>
 
         <form onSubmit={handleSubmit} className="space-y-4 text-center">
           <div>
@@ -47,22 +46,12 @@ export default function LoginPage() {
               className="w-full rounded-lg border border-gray-300 px-3 py-2 text-center text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
             />
           </div>
-          <div>
-            <label className="mb-1 block text-sm font-medium text-gray-700">비밀번호</label>
-            <input
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              autoComplete="current-password"
-              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-center text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
-            />
-          </div>
 
           {error && <div className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-600">{error}</div>}
 
           <button
             type="submit"
-            disabled={submitting || !username || !password}
+            disabled={submitting || !username}
             className="w-full rounded-lg bg-gray-900 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {submitting ? '로그인 중...' : '로그인'}

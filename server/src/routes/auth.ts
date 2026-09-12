@@ -8,7 +8,6 @@ const router = Router();
 
 const loginSchema = z.object({
   username: z.string().min(1),
-  password: z.string().min(1),
 });
 
 interface UserRow {
@@ -23,19 +22,20 @@ interface UserRow {
   must_change_password: number;
 }
 
+// Login now only checks that the username exists and is active — no password required.
 router.post('/login', (req, res) => {
   const parsed = loginSchema.safeParse(req.body);
   if (!parsed.success) {
-    return res.status(400).json({ error: '아이디와 비밀번호를 입력해주세요.' });
+    return res.status(400).json({ error: '아이디를 입력해주세요.' });
   }
-  const { username, password } = parsed.data;
+  const { username } = parsed.data;
 
   const user = db.prepare('SELECT * FROM users WHERE username = ?').get(username) as
     | UserRow
     | undefined;
 
-  if (!user || !bcrypt.compareSync(password, user.password_hash)) {
-    return res.status(401).json({ error: '아이디 또는 비밀번호가 올바르지 않습니다.' });
+  if (!user) {
+    return res.status(401).json({ error: '존재하지 않는 아이디입니다.' });
   }
   if (!user.is_active) {
     return res.status(403).json({ error: '비활성화된 계정입니다. 관리자에게 문의하세요.' });
