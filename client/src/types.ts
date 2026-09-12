@@ -7,7 +7,6 @@ export interface CurrentUser {
   role: Role;
   contact: string | null;
   color: string;
-  mustChangePassword: boolean;
 }
 
 export interface WorkerSummary {
@@ -21,7 +20,6 @@ export interface AdminUserView extends WorkerSummary {
   username: string;
   contact: string | null;
   isActive: boolean;
-  mustChangePassword: boolean;
   createdAt: string;
 }
 

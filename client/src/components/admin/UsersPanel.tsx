@@ -9,7 +9,6 @@ function AddWorkerForm({ onCreated }: { onCreated: () => void }) {
   const [open, setOpen] = useState(false);
   const [name, setName] = useState('');
   const [username, setUsername] = useState('');
-  const [tempPassword, setTempPassword] = useState('');
   const [contact, setContact] = useState('');
   const [color, setColor] = useState('#3b82f6');
   const [error, setError] = useState<string | null>(null);
@@ -19,11 +18,10 @@ function AddWorkerForm({ onCreated }: { onCreated: () => void }) {
     setSaving(true);
     setError(null);
     try {
-      await api.post('/users', { name, username, tempPassword, contact: contact || null, color });
+      await api.post('/users', { name, username, contact: contact || null, color });
       showToast(`${name} 계정이 생성되었습니다.`);
       setName('');
       setUsername('');
-      setTempPassword('');
       setContact('');
       setColor('#3b82f6');
       setOpen(false);
@@ -63,12 +61,6 @@ function AddWorkerForm({ onCreated }: { onCreated: () => void }) {
           className="rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
         />
         <input
-          placeholder="임시 비밀번호"
-          value={tempPassword}
-          onChange={(e) => setTempPassword(e.target.value)}
-          className="rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
-        />
-        <input
           placeholder="연락처 (선택)"
           value={contact}
           onChange={(e) => setContact(e.target.value)}
@@ -94,63 +86,12 @@ function AddWorkerForm({ onCreated }: { onCreated: () => void }) {
         </button>
         <button
           onClick={handleCreate}
-          disabled={saving || !name || !username || !tempPassword}
+          disabled={saving || !name || !username}
           className="flex-1 rounded-lg bg-gray-900 py-2 text-sm font-semibold text-white hover:bg-gray-800 disabled:opacity-50"
         >
           생성
         </button>
       </div>
-    </div>
-  );
-}
-
-function ResetPasswordControl({ userId, name }: { userId: number; name: string }) {
-  const { showToast } = useToast();
-  const [open, setOpen] = useState(false);
-  const [newPassword, setNewPassword] = useState('');
-  const [saving, setSaving] = useState(false);
-
-  async function handleReset() {
-    setSaving(true);
-    try {
-      await api.post(`/users/${userId}/reset-password`, { newPassword });
-      showToast(`${name}의 비밀번호가 초기화되었습니다.`);
-      setOpen(false);
-      setNewPassword('');
-    } catch (err) {
-      showToast(getApiErrorMessage(err), 'error');
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  if (!open) {
-    return (
-      <button onClick={() => setOpen(true)} className="text-xs text-blue-600 hover:underline">
-        비밀번호 초기화
-      </button>
-    );
-  }
-
-  return (
-    <div className="flex items-center gap-1">
-      <input
-        autoFocus
-        placeholder="새 임시 비밀번호"
-        value={newPassword}
-        onChange={(e) => setNewPassword(e.target.value)}
-        className="w-32 rounded border border-gray-300 px-2 py-1 text-xs"
-      />
-      <button
-        onClick={handleReset}
-        disabled={saving || newPassword.length < 3}
-        className="rounded bg-gray-900 px-2 py-1 text-xs text-white disabled:opacity-50"
-      >
-        확인
-      </button>
-      <button onClick={() => setOpen(false)} className="text-xs text-gray-400">
-        취소
-      </button>
     </div>
   );
 }
@@ -367,11 +308,6 @@ export default function UsersPanel() {
                     <ColorPickerDot value={u.color} onSave={(color) => changeColor(u, color)} size="sm" />
                   </span>
                   <EditableName userId={u.id} name={u.name} onRenamed={load} />
-                  {u.mustChangePassword && (
-                    <span className="ml-1.5 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] text-amber-700">
-                      초기 비번 미변경
-                    </span>
-                  )}
                 </td>
                 <td className="px-3 py-2.5 text-gray-500">
                   <EditableUsername userId={u.id} username={u.username} onRenamed={load} />
@@ -387,12 +323,9 @@ export default function UsersPanel() {
                   </span>
                 </td>
                 <td className="px-3 py-2.5">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <button onClick={() => toggleActive(u)} className="text-xs text-gray-600 hover:underline">
-                      {u.isActive ? '비활성화' : '재활성화'}
-                    </button>
-                    <ResetPasswordControl userId={u.id} name={u.name} />
-                  </div>
+                  <button onClick={() => toggleActive(u)} className="text-xs text-gray-600 hover:underline">
+                    {u.isActive ? '비활성화' : '재활성화'}
+                  </button>
                 </td>
               </tr>
             ))}

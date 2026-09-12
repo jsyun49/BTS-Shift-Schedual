@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import { z } from 'zod';
@@ -15,7 +16,6 @@ interface UserRow {
   contact: string | null;
   color: string;
   is_active: number;
-  must_change_password: number;
   created_at: string;
 }
 
@@ -25,7 +25,7 @@ router.get('/', (req, res) => {
   if (req.user!.role === 'admin') {
     const rows = db
       .prepare(
-        `SELECT id, name, username, role, contact, color, is_active, must_change_password, created_at
+        `SELECT id, name, username, role, contact, color, is_active, created_at
          FROM users ORDER BY role DESC, name ASC`
       )
       .all() as unknown as UserRow[];
@@ -38,7 +38,6 @@ router.get('/', (req, res) => {
         contact: r.contact,
         color: r.color,
         isActive: !!r.is_active,
-        mustChangePassword: !!r.must_change_password,
         createdAt: r.created_at,
       }))
     );
@@ -58,7 +57,6 @@ const createUserSchema = z.object({
     .string()
     .min(3, '아이디는 3자 이상이어야 합니다.')
     .regex(/^[a-zA-Z0-9_.-]+$/, '아이디는 영문/숫자/._- 만 사용할 수 있습니다.'),
-  tempPassword: z.string().min(3, '임시 비밀번호는 3자 이상이어야 합니다.'),
   contact: z.string().max(100).nullable().optional(),
   color: z
     .string()
@@ -66,28 +64,27 @@ const createUserSchema = z.object({
     .optional(),
 });
 
-// Admin: create a worker account
+// Admin: create a worker account. Login is username-only, so no password is collected —
+// password_hash is still NOT NULL in the schema, so it's filled with an unusable random value.
 router.post('/', requireRole('admin'), (req, res) => {
   const parsed = createUserSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: parsed.error.issues[0]?.message || '입력값이 올바르지 않습니다.' });
   }
-  const { name, username, tempPassword, contact, color } = parsed.data;
+  const { name, username, contact, color } = parsed.data;
 
   const existing = db.prepare('SELECT id FROM users WHERE username = ?').get(username);
   if (existing) {
     return res.status(409).json({ error: '이미 사용 중인 아이디입니다.' });
   }
 
-  // must_change_password stays 0: workers can no longer change their own password,
-  // so forcing a change they can't perform would lock them out of everything but /profile.
-  const hash = bcrypt.hashSync(tempPassword, 10);
+  const unusedHash = bcrypt.hashSync(crypto.randomBytes(32).toString('hex'), 10);
   const result = db
     .prepare(
       `INSERT INTO users (name, username, password_hash, role, contact, color, is_active, must_change_password)
        VALUES (?, ?, ?, 'worker', ?, ?, 1, 0)`
     )
-    .run(name, username, hash, contact ?? null, color ?? '#3b82f6');
+    .run(name, username, unusedHash, contact ?? null, color ?? '#3b82f6');
 
   res.status(201).json({ id: Number(result.lastInsertRowid) });
 });
@@ -105,7 +102,6 @@ const updateUserSchema = z.object({
     .regex(/^#[0-9a-fA-F]{6}$/)
     .optional(),
   isActive: z.boolean().optional(),
-  mustChangePassword: z.boolean().optional(),
 });
 
 // Admin: update a worker account (name, id/아이디, contact, color, active status).
@@ -124,7 +120,7 @@ router.patch('/:id', requireRole('admin'), (req, res) => {
   if (!parsed.success) {
     return res.status(400).json({ error: parsed.error.issues[0]?.message || '입력값이 올바르지 않습니다.' });
   }
-  const { name, username, contact, color, isActive, mustChangePassword } = parsed.data;
+  const { name, username, contact, color, isActive } = parsed.data;
 
   if (username) {
     const existing = db.prepare('SELECT id FROM users WHERE username = ? AND id != ?').get(username, id);
@@ -139,8 +135,7 @@ router.patch('/:id', requireRole('admin'), (req, res) => {
        username = COALESCE(?, username),
        contact = CASE WHEN ? THEN ? ELSE contact END,
        color = COALESCE(?, color),
-       is_active = COALESCE(?, is_active),
-       must_change_password = COALESCE(?, must_change_password)
+       is_active = COALESCE(?, is_active)
      WHERE id = ?`
   ).run(
     name ?? null,
@@ -149,35 +144,8 @@ router.patch('/:id', requireRole('admin'), (req, res) => {
     contact ?? null,
     color ?? null,
     isActive === undefined ? null : isActive ? 1 : 0,
-    mustChangePassword === undefined ? null : mustChangePassword ? 1 : 0,
     id
   );
-
-  res.json({ ok: true });
-});
-
-const resetPasswordSchema = z.object({
-  newPassword: z.string().min(3, '임시 비밀번호는 3자 이상이어야 합니다.'),
-});
-
-// Admin: reset a worker's password directly (workers cannot change their own password).
-router.post('/:id/reset-password', requireRole('admin'), (req, res) => {
-  const id = Number(req.params.id);
-  if (!Number.isInteger(id)) return res.status(400).json({ error: '잘못된 사용자 ID입니다.' });
-
-  const target = db.prepare('SELECT * FROM users WHERE id = ?').get(id) as UserRow | undefined;
-  if (!target) return res.status(404).json({ error: '사용자를 찾을 수 없습니다.' });
-  if (target.role === 'admin') {
-    return res.status(400).json({ error: '관리자 계정 비밀번호는 이 API로 초기화할 수 없습니다.' });
-  }
-
-  const parsed = resetPasswordSchema.safeParse(req.body);
-  if (!parsed.success) {
-    return res.status(400).json({ error: parsed.error.issues[0]?.message || '입력값이 올바르지 않습니다.' });
-  }
-
-  const hash = bcrypt.hashSync(parsed.data.newPassword, 10);
-  db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hash, id);
 
   res.json({ ok: true });
 });
