@@ -2,8 +2,11 @@ import axios from 'axios';
 
 export const TOKEN_STORAGE_KEY = 'shift_scheduler_token';
 
+// In dev, Vite proxies '/api' to the local backend (see vite.config.ts). In production,
+// the client is a static build with no backend of its own, so VITE_API_URL must point at
+// the deployed API's origin (e.g. https://<app>.fly.dev/api).
 export const api = axios.create({
-  baseURL: '/api',
+  baseURL: import.meta.env.VITE_API_URL || '/api',
 });
 
 api.interceptors.request.use((config) => {
