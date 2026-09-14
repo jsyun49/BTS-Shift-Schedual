@@ -2,6 +2,9 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 import express from 'express';
+// Patches Express 4 so rejected promises in async route handlers reach the error middleware
+// below, instead of hanging the request or crashing the process. Must be imported before routes.
+import 'express-async-errors';
 import cors from 'cors';
 import authRoutes from './routes/auth';
 import userRoutes from './routes/users';

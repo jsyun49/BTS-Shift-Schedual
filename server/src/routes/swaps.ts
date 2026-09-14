@@ -1,6 +1,6 @@
-import { Router } from 'express';
+import { Router, Response } from 'express';
 import { z } from 'zod';
-import db from '../db/db';
+import db, { dbAll, dbGet, dbRun } from '../db/db';
 import { authenticate, requireRole } from '../middleware/auth';
 import { logChange, notify } from '../utils/helpers';
 
@@ -50,14 +50,15 @@ function swapDetailQuery(whereClause: string) {
 }
 
 // List swap requests. Workers see only requests they're involved in; admins see all.
-router.get('/', (req, res) => {
+router.get('/', async (req, res) => {
   if (req.user!.role === 'admin') {
-    const rows = db.prepare(swapDetailQuery('')).all();
+    const rows = await dbAll(swapDetailQuery(''));
     return res.json(rows);
   }
-  const rows = db
-    .prepare(swapDetailQuery('WHERE sr.requester_id = ? OR sr.target_id = ?'))
-    .all(req.user!.id, req.user!.id);
+  const rows = await dbAll(swapDetailQuery('WHERE sr.requester_id = ? OR sr.target_id = ?'), [
+    req.user!.id,
+    req.user!.id,
+  ]);
   res.json(rows);
 });
 
@@ -69,7 +70,7 @@ const createSchema = z.object({
   requestedShiftTypeId: z.number().int().positive(),
 });
 
-router.post('/', (req, res) => {
+router.post('/', async (req, res) => {
   const parsed = createSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: parsed.error.issues[0]?.message || '입력값이 올바르지 않습니다.' });
@@ -81,14 +82,13 @@ router.post('/', (req, res) => {
     return res.status(403).json({ error: '본인의 근무만 변경 요청할 수 있습니다.' });
   }
 
-  const schedule = db.prepare('SELECT * FROM schedules WHERE id = ?').get(scheduleId) as
-    | ScheduleRow
-    | undefined;
+  const schedule = await dbGet<ScheduleRow>('SELECT * FROM schedules WHERE id = ?', [scheduleId]);
   if (!schedule) return res.status(404).json({ error: '근무 기록을 찾을 수 없습니다.' });
 
-  const target = db.prepare('SELECT id, name, is_active FROM users WHERE id = ?').get(targetId) as
-    | { id: number; name: string; is_active: number }
-    | undefined;
+  const target = await dbGet<{ id: number; name: string; is_active: number }>(
+    'SELECT id, name, is_active FROM users WHERE id = ?',
+    [targetId]
+  );
   if (!target || !target.is_active) {
     return res.status(404).json({ error: '대상 근무자를 찾을 수 없습니다.' });
   }
@@ -97,9 +97,10 @@ router.post('/', (req, res) => {
     return res.status(400).json({ error: '선택한 근무가 대상 근무자의 것이 아닙니다.' });
   }
 
-  const shiftType = db
-    .prepare('SELECT id, name, is_active FROM shift_types WHERE id = ?')
-    .get(requestedShiftTypeId) as { id: number; name: string; is_active: number } | undefined;
+  const shiftType = await dbGet<{ id: number; name: string; is_active: number }>(
+    'SELECT id, name, is_active FROM shift_types WHERE id = ?',
+    [requestedShiftTypeId]
+  );
   if (!shiftType || !shiftType.is_active) {
     return res.status(404).json({ error: '근무 유형을 찾을 수 없습니다.' });
   }
@@ -107,51 +108,44 @@ router.post('/', (req, res) => {
     return res.status(400).json({ error: '이미 해당 근무 유형으로 등록되어 있습니다.' });
   }
 
-  const duplicate = db
-    .prepare(`SELECT id FROM swap_requests WHERE status = 'pending' AND schedule_id = ?`)
-    .get(scheduleId);
+  const duplicate = await dbGet(`SELECT id FROM swap_requests WHERE status = 'pending' AND schedule_id = ?`, [
+    scheduleId,
+  ]);
   if (duplicate) {
     return res.status(409).json({ error: '이미 이 근무에 대한 변경 요청이 진행 중입니다.' });
   }
 
-  const result = db
-    .prepare(
-      `INSERT INTO swap_requests (requester_id, target_id, schedule_id, requested_shift_type_id, status)
-       VALUES (?, ?, ?, ?, 'pending')`
-    )
-    .run(req.user!.id, targetId, scheduleId, requestedShiftTypeId);
+  const result = await dbRun(
+    `INSERT INTO swap_requests (requester_id, target_id, schedule_id, requested_shift_type_id, status)
+     VALUES (?, ?, ?, ?, 'pending')`,
+    [req.user!.id, targetId, scheduleId, requestedShiftTypeId]
+  );
 
   const isSelfRequest = targetId === req.user!.id;
   if (isSelfRequest) {
-    const admins = db.prepare(`SELECT id FROM users WHERE role = 'admin' AND is_active = 1`).all() as unknown as {
-      id: number;
-    }[];
+    const admins = await dbAll<{ id: number }>(`SELECT id FROM users WHERE role = 'admin' AND is_active = 1`);
     for (const admin of admins) {
-      notify(
-        db,
+      await notify(
         admin.id,
         'SWAP_REQUEST_RECEIVED',
         `${req.user!.name}님이 본인의 ${schedule.date} 근무를 ${shiftType.name}(으)로 변경 요청했습니다.`,
-        Number(result.lastInsertRowid)
+        result.lastInsertRowid
       );
     }
   } else {
-    notify(
-      db,
+    await notify(
       targetId,
       'SWAP_REQUEST_RECEIVED',
       `${req.user!.name}님이 ${schedule.date} 근무를 ${shiftType.name}(으)로 변경 요청했습니다.`,
-      Number(result.lastInsertRowid)
+      result.lastInsertRowid
     );
   }
 
-  res.status(201).json({ id: Number(result.lastInsertRowid) });
+  res.status(201).json({ id: result.lastInsertRowid });
 });
 
-function getSwapOr404(id: number, res: any): SwapRow | undefined {
-  const swap = db.prepare('SELECT * FROM swap_requests WHERE id = ?').get(id) as
-    | SwapRow
-    | undefined;
+async function getSwapOr404(id: number, res: Response): Promise<SwapRow | undefined> {
+  const swap = await dbGet<SwapRow>('SELECT * FROM swap_requests WHERE id = ?', [id]);
   if (!swap) {
     res.status(404).json({ error: '교대 요청을 찾을 수 없습니다.' });
     return undefined;
@@ -163,11 +157,11 @@ function getSwapOr404(id: number, res: any): SwapRow | undefined {
 // For a self-targeted request (worker asking to change their own schedule), only an admin may
 // accept — workers cannot self-approve changes beyond 희망휴무, per the schedule editing rules.
 // Performed atomically.
-router.post('/:id/accept', (req, res) => {
+router.post('/:id/accept', async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id)) return res.status(400).json({ error: '잘못된 ID입니다.' });
 
-  const swap = getSwapOr404(id, res);
+  const swap = await getSwapOr404(id, res);
   if (!swap) return;
 
   const isSelfRequest = swap.target_id === swap.requester_id;
@@ -182,9 +176,7 @@ router.post('/:id/accept', (req, res) => {
     return res.status(409).json({ error: '이미 처리된 변경 요청입니다.' });
   }
 
-  const s1 = db.prepare('SELECT * FROM schedules WHERE id = ?').get(swap.schedule_id) as
-    | ScheduleRow
-    | undefined;
+  const s1 = await dbGet<ScheduleRow>('SELECT * FROM schedules WHERE id = ?', [swap.schedule_id]);
   if (!s1 || s1.user_id !== swap.target_id) {
     return res.status(409).json({ error: '대상자의 근무 정보가 변경되어 처리할 수 없습니다.' });
   }
@@ -192,73 +184,78 @@ router.post('/:id/accept', (req, res) => {
     return res.status(409).json({ error: '요청된 근무 유형 정보가 없습니다.' });
   }
 
-  db.exec('BEGIN');
+  let others: SwapRow[] = [];
+  const tx = await db.transaction('write');
   try {
-    db.prepare(`UPDATE schedules SET shift_type_id = ?, updated_at = datetime('now') WHERE id = ?`).run(
-      swap.requested_shift_type_id,
-      s1.id
-    );
-
-    db.prepare(`UPDATE swap_requests SET status = 'accepted', resolved_at = datetime('now') WHERE id = ?`).run(
-      id
-    );
-
-    // Auto-cancel any other pending requests referencing the now-changed schedule.
-    const others = db
-      .prepare(`SELECT * FROM swap_requests WHERE status = 'pending' AND id != ? AND schedule_id = ?`)
-      .all(id, s1.id) as unknown as SwapRow[];
-    for (const other of others) {
-      db.prepare(`UPDATE swap_requests SET status = 'cancelled', resolved_at = datetime('now') WHERE id = ?`).run(
-        other.id
-      );
-      notify(
-        db,
-        other.requester_id,
-        'SWAP_AUTO_CANCELLED',
-        '관련된 근무가 다른 변경 요청으로 처리되어 요청이 자동 취소되었습니다.',
-        other.id
-      );
-    }
-
-    logChange(db, req.user!.id, 'SWAP_ACCEPT', s1.id, {
-      swapId: id,
-      requesterId: swap.requester_id,
-      targetId: swap.target_id,
-      scheduleId: s1.id,
-      requestedShiftTypeId: swap.requested_shift_type_id,
+    await tx.execute({
+      sql: `UPDATE schedules SET shift_type_id = ?, updated_at = datetime('now') WHERE id = ?`,
+      args: [swap.requested_shift_type_id, s1.id],
     });
 
-    db.exec('COMMIT');
+    await tx.execute({
+      sql: `UPDATE swap_requests SET status = 'accepted', resolved_at = datetime('now') WHERE id = ?`,
+      args: [id],
+    });
+
+    // Auto-cancel any other pending requests referencing the now-changed schedule.
+    const othersRs = await tx.execute({
+      sql: `SELECT * FROM swap_requests WHERE status = 'pending' AND id != ? AND schedule_id = ?`,
+      args: [id, s1.id],
+    });
+    others = othersRs.rows as unknown as SwapRow[];
+    for (const other of others) {
+      await tx.execute({
+        sql: `UPDATE swap_requests SET status = 'cancelled', resolved_at = datetime('now') WHERE id = ?`,
+        args: [other.id],
+      });
+    }
+
+    await tx.execute({
+      sql: `INSERT INTO change_logs (user_id, action, target_schedule_id, detail) VALUES (?, ?, ?, ?)`,
+      args: [
+        req.user!.id,
+        'SWAP_ACCEPT',
+        s1.id,
+        JSON.stringify({
+          swapId: id,
+          requesterId: swap.requester_id,
+          targetId: swap.target_id,
+          scheduleId: s1.id,
+          requestedShiftTypeId: swap.requested_shift_type_id,
+        }),
+      ],
+    });
+
+    await tx.commit();
   } catch (err) {
-    db.exec('ROLLBACK');
+    await tx.rollback();
     throw err;
+  } finally {
+    tx.close();
   }
 
-  notify(
-    db,
-    swap.requester_id,
-    'SWAP_ACCEPTED',
-    `${s1.date} 근무 변경 요청이 수락되었습니다.`,
-    id
-  );
-  if (swap.target_id !== swap.requester_id) {
-    notify(
-      db,
-      swap.target_id,
-      'SWAP_ACCEPTED',
-      `${s1.date} 근무가 변경 요청에 따라 수락되었습니다.`,
-      id
+  for (const other of others) {
+    await notify(
+      other.requester_id,
+      'SWAP_AUTO_CANCELLED',
+      '관련된 근무가 다른 변경 요청으로 처리되어 요청이 자동 취소되었습니다.',
+      other.id
     );
+  }
+
+  await notify(swap.requester_id, 'SWAP_ACCEPTED', `${s1.date} 근무 변경 요청이 수락되었습니다.`, id);
+  if (swap.target_id !== swap.requester_id) {
+    await notify(swap.target_id, 'SWAP_ACCEPTED', `${s1.date} 근무가 변경 요청에 따라 수락되었습니다.`, id);
   }
 
   res.json({ ok: true });
 });
 
-router.post('/:id/reject', (req, res) => {
+router.post('/:id/reject', async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id)) return res.status(400).json({ error: '잘못된 ID입니다.' });
 
-  const swap = getSwapOr404(id, res);
+  const swap = await getSwapOr404(id, res);
   if (!swap) return;
 
   if (req.user!.role !== 'admin' && swap.target_id !== req.user!.id) {
@@ -268,18 +265,18 @@ router.post('/:id/reject', (req, res) => {
     return res.status(409).json({ error: '이미 처리된 변경 요청입니다.' });
   }
 
-  db.prepare(`UPDATE swap_requests SET status = 'rejected', resolved_at = datetime('now') WHERE id = ?`).run(id);
+  await dbRun(`UPDATE swap_requests SET status = 'rejected', resolved_at = datetime('now') WHERE id = ?`, [id]);
 
-  notify(db, swap.requester_id, 'SWAP_REJECTED', '근무 변경 요청이 거절되었습니다.', id);
+  await notify(swap.requester_id, 'SWAP_REJECTED', '근무 변경 요청이 거절되었습니다.', id);
 
   res.json({ ok: true });
 });
 
-router.post('/:id/cancel', (req, res) => {
+router.post('/:id/cancel', async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id)) return res.status(400).json({ error: '잘못된 ID입니다.' });
 
-  const swap = getSwapOr404(id, res);
+  const swap = await getSwapOr404(id, res);
   if (!swap) return;
 
   if (req.user!.role !== 'admin' && swap.requester_id !== req.user!.id) {
@@ -289,26 +286,26 @@ router.post('/:id/cancel', (req, res) => {
     return res.status(409).json({ error: '이미 처리된 변경 요청입니다.' });
   }
 
-  db.prepare(`UPDATE swap_requests SET status = 'cancelled', resolved_at = datetime('now') WHERE id = ?`).run(id);
+  await dbRun(`UPDATE swap_requests SET status = 'cancelled', resolved_at = datetime('now') WHERE id = ?`, [id]);
 
   if (req.user!.role === 'admin') {
-    notify(db, swap.requester_id, 'SWAP_AUTO_CANCELLED', '관리자가 근무 변경 요청을 취소했습니다.', id);
+    await notify(swap.requester_id, 'SWAP_AUTO_CANCELLED', '관리자가 근무 변경 요청을 취소했습니다.', id);
   } else if (swap.target_id !== swap.requester_id) {
-    notify(db, swap.target_id, 'SWAP_AUTO_CANCELLED', '요청자가 근무 변경 요청을 취소했습니다.', id);
+    await notify(swap.target_id, 'SWAP_AUTO_CANCELLED', '요청자가 근무 변경 요청을 취소했습니다.', id);
   }
 
   res.json({ ok: true });
 });
 
 // Admin: permanently delete one swap request record (from the admin swap-management screen).
-router.delete('/:id', requireRole('admin'), (req, res) => {
+router.delete('/:id', requireRole('admin'), async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id)) return res.status(400).json({ error: '잘못된 ID입니다.' });
 
-  const swap = getSwapOr404(id, res);
+  const swap = await getSwapOr404(id, res);
   if (!swap) return;
 
-  db.prepare('DELETE FROM swap_requests WHERE id = ?').run(id);
+  await dbRun('DELETE FROM swap_requests WHERE id = ?', [id]);
   res.json({ ok: true });
 });
 
@@ -317,26 +314,27 @@ const bulkDeleteSchema = z.object({
 });
 
 // Admin: permanently delete multiple swap request records at once (전체 선택 / 전체 삭제).
-router.post('/bulk-delete', requireRole('admin'), (req, res) => {
+router.post('/bulk-delete', requireRole('admin'), async (req, res) => {
   const parsed = bulkDeleteSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: parsed.error.issues[0]?.message || '입력값이 올바르지 않습니다.' });
   }
   const { ids } = parsed.data;
 
-  db.exec('BEGIN');
+  const tx = await db.transaction('write');
   try {
-    const stmt = db.prepare('DELETE FROM swap_requests WHERE id = ?');
     let deleted = 0;
     for (const id of ids) {
-      const result = stmt.run(id);
-      deleted += Number(result.changes);
+      const rs = await tx.execute({ sql: 'DELETE FROM swap_requests WHERE id = ?', args: [id] });
+      deleted += rs.rowsAffected;
     }
-    db.exec('COMMIT');
+    await tx.commit();
     res.json({ ok: true, deleted });
   } catch (err) {
-    db.exec('ROLLBACK');
+    await tx.rollback();
     throw err;
+  } finally {
+    tx.close();
   }
 });
 

@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import db from '../db/db';
+import { dbGet, dbRun } from '../db/db';
 import { authenticate, signToken } from '../middleware/auth';
 
 const router = Router();
@@ -21,16 +21,14 @@ interface UserRow {
 }
 
 // Login now only checks that the username exists and is active — no password required.
-router.post('/login', (req, res) => {
+router.post('/login', async (req, res) => {
   const parsed = loginSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: '아이디를 입력해주세요.' });
   }
   const { username } = parsed.data;
 
-  const user = db.prepare('SELECT * FROM users WHERE username = ?').get(username) as
-    | UserRow
-    | undefined;
+  const user = await dbGet<UserRow>('SELECT * FROM users WHERE username = ?', [username]);
 
   if (!user) {
     return res.status(401).json({ error: '존재하지 않는 아이디입니다.' });
@@ -59,10 +57,8 @@ router.post('/login', (req, res) => {
   });
 });
 
-router.get('/me', authenticate, (req, res) => {
-  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user!.id) as
-    | UserRow
-    | undefined;
+router.get('/me', authenticate, async (req, res) => {
+  const user = await dbGet<UserRow>('SELECT * FROM users WHERE id = ?', [req.user!.id]);
   if (!user) return res.status(404).json({ error: '사용자를 찾을 수 없습니다.' });
   res.json({
     id: user.id,
@@ -78,15 +74,12 @@ const updateProfileSchema = z.object({
   contact: z.string().max(100).nullable().optional(),
 });
 
-router.patch('/me', authenticate, (req, res) => {
+router.patch('/me', authenticate, async (req, res) => {
   const parsed = updateProfileSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: '입력값이 올바르지 않습니다.' });
   }
-  db.prepare('UPDATE users SET contact = ? WHERE id = ?').run(
-    parsed.data.contact ?? null,
-    req.user!.id
-  );
+  await dbRun('UPDATE users SET contact = ? WHERE id = ?', [parsed.data.contact ?? null, req.user!.id]);
   res.json({ ok: true });
 });
 

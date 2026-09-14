@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import db from '../db/db';
+import { dbAll } from '../db/db';
 import { authenticate } from '../middleware/auth';
 
 const router = Router();
@@ -10,29 +10,26 @@ const monthSchema = z.object({
   month: z.string().regex(/^\d{4}-\d{2}$/, 'month은 YYYY-MM 형식이어야 합니다.'),
 });
 
-router.get('/', (req, res) => {
+router.get('/', async (req, res) => {
   const parsed = monthSchema.safeParse(req.query);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message });
   const { month } = parsed.data;
 
-  const users = db
-    .prepare(`SELECT id, name, color FROM users WHERE role = 'worker' ORDER BY name ASC`)
-    .all() as { id: number; name: string; color: string }[];
+  const users = await dbAll<{ id: number; name: string; color: string }>(
+    `SELECT id, name, color FROM users WHERE role = 'worker' ORDER BY name ASC`
+  );
 
-  const shiftTypes = db.prepare('SELECT id, name, is_off FROM shift_types').all() as {
-    id: number;
-    name: string;
-    is_off: number;
-  }[];
+  const shiftTypes = await dbAll<{ id: number; name: string; is_off: number }>(
+    'SELECT id, name, is_off FROM shift_types'
+  );
 
-  const rows = db
-    .prepare(
-      `SELECT s.user_id, s.shift_type_id, COUNT(*) as cnt
-       FROM schedules s
-       WHERE s.date LIKE ?
-       GROUP BY s.user_id, s.shift_type_id`
-    )
-    .all(`${month}-%`) as { user_id: number; shift_type_id: number; cnt: number }[];
+  const rows = await dbAll<{ user_id: number; shift_type_id: number; cnt: number }>(
+    `SELECT s.user_id, s.shift_type_id, COUNT(*) as cnt
+     FROM schedules s
+     WHERE s.date LIKE ?
+     GROUP BY s.user_id, s.shift_type_id`,
+    [`${month}-%`]
+  );
 
   const stats = users.map((u) => {
     const byShiftType: Record<string, number> = {};

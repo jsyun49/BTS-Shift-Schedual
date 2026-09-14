@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import db from '../db/db';
+import db, { dbAll, dbGet, dbRun } from '../db/db';
 import { authenticate, requireRole } from '../middleware/auth';
 import { isValidDate, logChange, notify } from '../utils/helpers';
 
@@ -27,34 +27,33 @@ const monthSchema = z.object({
 });
 
 // Anyone authenticated can view the full team calendar (read-only for others' shifts).
-router.get('/', (req, res) => {
+router.get('/', async (req, res) => {
   const parsed = monthSchema.safeParse(req.query);
   if (!parsed.success) {
     return res.status(400).json({ error: parsed.error.issues[0]?.message });
   }
   const { month } = parsed.data;
 
-  const rows = db
-    .prepare(
-      `SELECT s.id, s.user_id, s.date, s.shift_type_id, s.created_by, s.updated_at,
-              u.name as user_name, u.color as user_color,
-              st.name as shift_type_name, st.color as shift_type_color, st.is_off as shift_is_off,
-              st.start_time, st.end_time
-       FROM schedules s
-       JOIN users u ON u.id = s.user_id
-       JOIN shift_types st ON st.id = s.shift_type_id
-       WHERE s.date LIKE ?
-       ORDER BY s.date ASC`
-    )
-    .all(`${month}-%`);
+  const rows = await dbAll<any>(
+    `SELECT s.id, s.user_id, s.date, s.shift_type_id, s.created_by, s.updated_at,
+            u.name as user_name, u.color as user_color,
+            st.name as shift_type_name, st.color as shift_type_color, st.is_off as shift_is_off,
+            st.start_time, st.end_time
+     FROM schedules s
+     JOIN users u ON u.id = s.user_id
+     JOIN shift_types st ON st.id = s.shift_type_id
+     WHERE s.date LIKE ?
+     ORDER BY s.date ASC`,
+    [`${month}-%`]
+  );
 
-  const minStaffSetting = db
-    .prepare("SELECT value FROM settings WHERE key = 'min_staff_per_day'")
-    .get() as { value: string } | undefined;
+  const minStaffSetting = await dbGet<{ value: string }>(
+    "SELECT value FROM settings WHERE key = 'min_staff_per_day'"
+  );
   const minStaff = minStaffSetting ? parseInt(minStaffSetting.value, 10) : 0;
 
   const workingCountByDate: Record<string, number> = {};
-  for (const r of rows as any[]) {
+  for (const r of rows) {
     if (!r.shift_is_off) {
       workingCountByDate[r.date] = (workingCountByDate[r.date] || 0) + 1;
     }
@@ -84,7 +83,7 @@ const createSchema = z.object({
   userId: z.number().int().positive().optional(),
 });
 
-router.post('/', (req, res) => {
+router.post('/', async (req, res) => {
   const parsed = createSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: parsed.error.issues[0]?.message || '입력값이 올바르지 않습니다.' });
@@ -97,51 +96,52 @@ router.post('/', (req, res) => {
     return res.status(403).json({ error: '본인의 근무만 등록할 수 있습니다.' });
   }
 
-  const targetUser = db.prepare('SELECT id, is_active FROM users WHERE id = ?').get(requestedUserId) as
-    | { id: number; is_active: number }
-    | undefined;
+  const targetUser = await dbGet<{ id: number; is_active: number }>(
+    'SELECT id, is_active FROM users WHERE id = ?',
+    [requestedUserId]
+  );
   if (!targetUser) return res.status(404).json({ error: '대상 사용자를 찾을 수 없습니다.' });
   if (!targetUser.is_active) return res.status(400).json({ error: '비활성화된 사용자에게는 근무를 등록할 수 없습니다.' });
 
-  const shiftType = db
-    .prepare('SELECT id, name FROM shift_types WHERE id = ? AND is_active = 1')
-    .get(shiftTypeId) as { id: number; name: string } | undefined;
+  const shiftType = await dbGet<{ id: number; name: string }>(
+    'SELECT id, name FROM shift_types WHERE id = ? AND is_active = 1',
+    [shiftTypeId]
+  );
   if (!shiftType) return res.status(400).json({ error: '존재하지 않거나 비활성화된 근무 유형입니다.' });
 
   if (req.user!.role !== 'admin' && !SELF_SERVICE_NAMES.includes(shiftType.name)) {
     return res.status(403).json({ error: WORKER_RESTRICTION_MESSAGE });
   }
 
-  const existing = db
-    .prepare('SELECT id FROM schedules WHERE user_id = ? AND date = ?')
-    .get(requestedUserId, date);
+  const existing = await dbGet('SELECT id FROM schedules WHERE user_id = ? AND date = ?', [
+    requestedUserId,
+    date,
+  ]);
   if (existing) {
     return res.status(409).json({ error: '해당 날짜에 이미 근무가 등록되어 있습니다.' });
   }
 
-  const result = db
-    .prepare(
-      `INSERT INTO schedules (user_id, date, shift_type_id, created_by) VALUES (?, ?, ?, ?)`
-    )
-    .run(requestedUserId, date, shiftTypeId, req.user!.id);
+  const result = await dbRun(
+    `INSERT INTO schedules (user_id, date, shift_type_id, created_by) VALUES (?, ?, ?, ?)`,
+    [requestedUserId, date, shiftTypeId, req.user!.id]
+  );
 
-  logChange(db, req.user!.id, 'CREATE_SCHEDULE', Number(result.lastInsertRowid), {
+  await logChange(req.user!.id, 'CREATE_SCHEDULE', result.lastInsertRowid, {
     userId: requestedUserId,
     date,
     shiftTypeId,
   });
 
   if (req.user!.role === 'admin' && requestedUserId !== req.user!.id) {
-    notify(
-      db,
+    await notify(
       requestedUserId,
       'ADMIN_MODIFIED_SCHEDULE',
       `관리자가 회원님의 ${date} 근무를 등록했습니다.`,
-      Number(result.lastInsertRowid)
+      result.lastInsertRowid
     );
   }
 
-  res.status(201).json({ id: Number(result.lastInsertRowid) });
+  res.status(201).json({ id: result.lastInsertRowid });
 });
 
 const bulkCreateSchema = z.object({
@@ -163,7 +163,7 @@ function dateRange(startDate: string, endDate: string): string[] {
 }
 
 // Register the same shift type across a date range in one call (기간 선택 등록).
-router.post('/bulk-create', (req, res) => {
+router.post('/bulk-create', async (req, res) => {
   const parsed = bulkCreateSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: parsed.error.issues[0]?.message || '입력값이 올바르지 않습니다.' });
@@ -183,54 +183,58 @@ router.post('/bulk-create', (req, res) => {
     return res.status(400).json({ error: '한 번에 등록할 수 있는 기간은 최대 366일입니다.' });
   }
 
-  const targetUser = db.prepare('SELECT id, is_active FROM users WHERE id = ?').get(requestedUserId) as
-    | { id: number; is_active: number }
-    | undefined;
+  const targetUser = await dbGet<{ id: number; is_active: number }>(
+    'SELECT id, is_active FROM users WHERE id = ?',
+    [requestedUserId]
+  );
   if (!targetUser) return res.status(404).json({ error: '대상 사용자를 찾을 수 없습니다.' });
   if (!targetUser.is_active) return res.status(400).json({ error: '비활성화된 사용자에게는 근무를 등록할 수 없습니다.' });
 
-  const shiftType = db
-    .prepare('SELECT id, name FROM shift_types WHERE id = ? AND is_active = 1')
-    .get(shiftTypeId) as { id: number; name: string } | undefined;
+  const shiftType = await dbGet<{ id: number; name: string }>(
+    'SELECT id, name FROM shift_types WHERE id = ? AND is_active = 1',
+    [shiftTypeId]
+  );
   if (!shiftType) return res.status(400).json({ error: '존재하지 않거나 비활성화된 근무 유형입니다.' });
 
   if (req.user!.role !== 'admin' && !SELF_SERVICE_NAMES.includes(shiftType.name)) {
     return res.status(403).json({ error: WORKER_RESTRICTION_MESSAGE });
   }
 
-  const checkStmt = db.prepare('SELECT id FROM schedules WHERE user_id = ? AND date = ?');
-  const insertStmt = db.prepare(
-    `INSERT INTO schedules (user_id, date, shift_type_id, created_by) VALUES (?, ?, ?, ?)`
-  );
-
   const skipped: string[] = [];
   let created = 0;
 
-  db.exec('BEGIN');
+  const tx = await db.transaction('write');
   try {
     for (const date of dates) {
-      const existing = checkStmt.get(requestedUserId, date);
-      if (existing) {
+      const existingRs = await tx.execute({
+        sql: 'SELECT id FROM schedules WHERE user_id = ? AND date = ?',
+        args: [requestedUserId, date],
+      });
+      if (existingRs.rows.length > 0) {
         skipped.push(date);
         continue;
       }
-      const result = insertStmt.run(requestedUserId, date, shiftTypeId, req.user!.id);
-      logChange(db, req.user!.id, 'CREATE_SCHEDULE', Number(result.lastInsertRowid), {
-        userId: requestedUserId,
-        date,
-        shiftTypeId,
+      const insertRs = await tx.execute({
+        sql: `INSERT INTO schedules (user_id, date, shift_type_id, created_by) VALUES (?, ?, ?, ?)`,
+        args: [requestedUserId, date, shiftTypeId, req.user!.id],
+      });
+      const newId = Number(insertRs.lastInsertRowid ?? 0);
+      await tx.execute({
+        sql: `INSERT INTO change_logs (user_id, action, target_schedule_id, detail) VALUES (?, ?, ?, ?)`,
+        args: [req.user!.id, 'CREATE_SCHEDULE', newId, JSON.stringify({ userId: requestedUserId, date, shiftTypeId })],
       });
       created++;
     }
-    db.exec('COMMIT');
+    await tx.commit();
   } catch (err) {
-    db.exec('ROLLBACK');
+    await tx.rollback();
     throw err;
+  } finally {
+    tx.close();
   }
 
   if (created > 0 && req.user!.role === 'admin' && requestedUserId !== req.user!.id) {
-    notify(
-      db,
+    await notify(
       requestedUserId,
       'ADMIN_MODIFIED_SCHEDULE',
       `관리자가 회원님의 ${startDate} ~ ${endDate} 근무를 등록했습니다.`,
@@ -250,13 +254,11 @@ const updateSchema = z
     message: '변경할 근무 유형 또는 날짜를 입력해주세요.',
   });
 
-router.patch('/:id', (req, res) => {
+router.patch('/:id', async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id)) return res.status(400).json({ error: '잘못된 ID입니다.' });
 
-  const schedule = db.prepare('SELECT * FROM schedules WHERE id = ?').get(id) as
-    | ScheduleRow
-    | undefined;
+  const schedule = await dbGet<ScheduleRow>('SELECT * FROM schedules WHERE id = ?', [id]);
   if (!schedule) return res.status(404).json({ error: '근무 기록을 찾을 수 없습니다.' });
 
   // Server-side ownership check: only the owner or an admin may edit.
@@ -276,18 +278,19 @@ router.patch('/:id', (req, res) => {
     if (date !== undefined) {
       return res.status(403).json({ error: '근무 날짜 이동은 관리자만 할 수 있습니다.' });
     }
-    const currentType = db
-      .prepare('SELECT name FROM shift_types WHERE id = ?')
-      .get(schedule.shift_type_id) as { name: string } | undefined;
+    const currentType = await dbGet<{ name: string }>('SELECT name FROM shift_types WHERE id = ?', [
+      schedule.shift_type_id,
+    ]);
     if (!currentType || !SELF_SERVICE_NAMES.includes(currentType.name)) {
       return res.status(403).json({ error: WORKER_RESTRICTION_MESSAGE });
     }
   }
 
   if (shiftTypeId !== undefined) {
-    const shiftType = db
-      .prepare('SELECT id, name FROM shift_types WHERE id = ? AND is_active = 1')
-      .get(shiftTypeId) as { id: number; name: string } | undefined;
+    const shiftType = await dbGet<{ id: number; name: string }>(
+      'SELECT id, name FROM shift_types WHERE id = ? AND is_active = 1',
+      [shiftTypeId]
+    );
     if (!shiftType) return res.status(400).json({ error: '존재하지 않거나 비활성화된 근무 유형입니다.' });
 
     if (req.user!.role !== 'admin' && !SELF_SERVICE_NAMES.includes(shiftType.name)) {
@@ -297,19 +300,22 @@ router.patch('/:id', (req, res) => {
 
   const targetDate = date ?? schedule.date;
   if (date !== undefined && date !== schedule.date) {
-    const conflict = db
-      .prepare('SELECT id FROM schedules WHERE user_id = ? AND date = ? AND id != ?')
-      .get(schedule.user_id, date, id);
+    const conflict = await dbGet('SELECT id FROM schedules WHERE user_id = ? AND date = ? AND id != ?', [
+      schedule.user_id,
+      date,
+      id,
+    ]);
     if (conflict) {
       return res.status(409).json({ error: '해당 날짜에 이미 근무가 등록되어 있습니다.' });
     }
   }
 
-  db.prepare(
-    `UPDATE schedules SET shift_type_id = COALESCE(?, shift_type_id), date = ?, updated_at = datetime('now') WHERE id = ?`
-  ).run(shiftTypeId ?? null, targetDate, id);
+  await dbRun(
+    `UPDATE schedules SET shift_type_id = COALESCE(?, shift_type_id), date = ?, updated_at = datetime('now') WHERE id = ?`,
+    [shiftTypeId ?? null, targetDate, id]
+  );
 
-  logChange(db, req.user!.id, 'UPDATE_SCHEDULE', id, {
+  await logChange(req.user!.id, 'UPDATE_SCHEDULE', id, {
     fromShiftTypeId: schedule.shift_type_id,
     toShiftTypeId: shiftTypeId ?? schedule.shift_type_id,
     fromDate: schedule.date,
@@ -317,8 +323,7 @@ router.patch('/:id', (req, res) => {
   });
 
   if (req.user!.role === 'admin' && schedule.user_id !== req.user!.id) {
-    notify(
-      db,
+    await notify(
       schedule.user_id,
       'ADMIN_MODIFIED_SCHEDULE',
       date !== undefined && date !== schedule.date
@@ -331,13 +336,11 @@ router.patch('/:id', (req, res) => {
   res.json({ ok: true });
 });
 
-router.delete('/:id', (req, res) => {
+router.delete('/:id', async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id)) return res.status(400).json({ error: '잘못된 ID입니다.' });
 
-  const schedule = db.prepare('SELECT * FROM schedules WHERE id = ?').get(id) as
-    | ScheduleRow
-    | undefined;
+  const schedule = await dbGet<ScheduleRow>('SELECT * FROM schedules WHERE id = ?', [id]);
   if (!schedule) return res.status(404).json({ error: '근무 기록을 찾을 수 없습니다.' });
 
   if (req.user!.role !== 'admin' && schedule.user_id !== req.user!.id) {
@@ -346,32 +349,32 @@ router.delete('/:id', (req, res) => {
 
   // Workers may only delete their own self-service entries.
   if (req.user!.role !== 'admin') {
-    const currentType = db
-      .prepare('SELECT name FROM shift_types WHERE id = ?')
-      .get(schedule.shift_type_id) as { name: string } | undefined;
+    const currentType = await dbGet<{ name: string }>('SELECT name FROM shift_types WHERE id = ?', [
+      schedule.shift_type_id,
+    ]);
     if (!currentType || !SELF_SERVICE_NAMES.includes(currentType.name)) {
       return res.status(403).json({ error: WORKER_RESTRICTION_MESSAGE });
     }
   }
 
-  const activeSwap = db
-    .prepare("SELECT id FROM swap_requests WHERE status = 'pending' AND (schedule_id = ? OR target_schedule_id = ?)")
-    .get(id, id);
+  const activeSwap = await dbGet(
+    "SELECT id FROM swap_requests WHERE status = 'pending' AND (schedule_id = ? OR target_schedule_id = ?)",
+    [id, id]
+  );
   if (activeSwap) {
     return res.status(409).json({ error: '진행 중인 교대 요청이 있는 근무는 삭제할 수 없습니다. 먼저 요청을 취소해주세요.' });
   }
 
-  db.prepare('DELETE FROM schedules WHERE id = ?').run(id);
+  await dbRun('DELETE FROM schedules WHERE id = ?', [id]);
 
-  logChange(db, req.user!.id, 'DELETE_SCHEDULE', id, {
+  await logChange(req.user!.id, 'DELETE_SCHEDULE', id, {
     userId: schedule.user_id,
     date: schedule.date,
     shiftTypeId: schedule.shift_type_id,
   });
 
   if (req.user!.role === 'admin' && schedule.user_id !== req.user!.id) {
-    notify(
-      db,
+    await notify(
       schedule.user_id,
       'ADMIN_MODIFIED_SCHEDULE',
       `관리자가 회원님의 ${schedule.date} 근무를 삭제했습니다.`,
@@ -383,17 +386,15 @@ router.delete('/:id', (req, res) => {
 });
 
 // Admin: view change history
-router.get('/change-logs', requireRole('admin'), (req, res) => {
-  const rows = db
-    .prepare(
-      `SELECT cl.id, cl.action, cl.target_schedule_id, cl.detail, cl.timestamp,
-              u.name as user_name
-       FROM change_logs cl
-       JOIN users u ON u.id = cl.user_id
-       ORDER BY cl.timestamp DESC
-       LIMIT 500`
-    )
-    .all();
+router.get('/change-logs', requireRole('admin'), async (req, res) => {
+  const rows = await dbAll(
+    `SELECT cl.id, cl.action, cl.target_schedule_id, cl.detail, cl.timestamp,
+            u.name as user_name
+     FROM change_logs cl
+     JOIN users u ON u.id = cl.user_id
+     ORDER BY cl.timestamp DESC
+     LIMIT 500`
+  );
   res.json(rows);
 });
 
